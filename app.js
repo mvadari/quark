@@ -110,13 +110,10 @@ function removeTransaction(id) {
 
     transactions.splice(index, 1);
 
-    // Update current transaction ID
+    // Clear current transaction selection when deleting
+    // This shows the "no test selected" or "no tests yet" state
     if (currentTransactionId === id) {
-        if (transactions.length > 0) {
-            currentTransactionId = transactions[0].id;
-        } else {
-            currentTransactionId = null;
-        }
+        currentTransactionId = null;
     }
 
     saveTestsToStorage();
@@ -170,7 +167,7 @@ function renderWorkspace() {
     workspace.innerHTML = '';
 
     if (transactions.length === 0) {
-        showWorkspacePlaceholder();
+        showWorkspacePlaceholder('empty');
         renderTestQueue();
         return;
     }
@@ -180,7 +177,7 @@ function renderWorkspace() {
     if (currentTx) {
         renderActiveTransaction(currentTx);
     } else {
-        showWorkspacePlaceholder();
+        showWorkspacePlaceholder('no-selection');
     }
 
     // Render all transactions in the test queue
@@ -437,6 +434,7 @@ function createTestQueueItem(transaction, number) {
             removeTransaction(transaction.id);
             renderWorkspace();
             updateTransactionTypeSectionVisibility();
+            updateCurrentTestLabel();
             updateJSONOutput();
         }
     });
@@ -488,8 +486,17 @@ function updateCurrentTestLabel() {
     if (currentTx) {
         label.textContent = `Editing: ${currentTx.name}`;
         label.style.display = '';
+        label.style.opacity = '1';
+    } else if (transactions.length > 0) {
+        // Tests exist but none selected
+        label.textContent = 'No test selected';
+        label.style.display = '';
+        label.style.opacity = '0.6';
     } else {
-        label.style.display = 'none';
+        // No tests at all
+        label.textContent = 'No tests yet';
+        label.style.display = '';
+        label.style.opacity = '0.6';
     }
 }
 
@@ -1832,14 +1839,31 @@ function removeFieldBlock(fieldName) {
     }
 }
 
-function showWorkspacePlaceholder() {
+function showWorkspacePlaceholder(mode = 'empty') {
     const workspace = document.getElementById('workspace');
     const placeholder = document.createElement('div');
     placeholder.className = 'workspace-placeholder';
-    placeholder.innerHTML = `
-        <p>👆 Drag blocks here to build your transaction</p>
-        <p class="hint">Start with a Transaction Type block</p>
-    `;
+
+    if (mode === 'empty') {
+        // No tests exist at all
+        placeholder.innerHTML = `
+            <p>No tests yet</p>
+            <p class="hint">Click "➕ Add Test" to create your first test</p>
+        `;
+    } else if (mode === 'no-selection') {
+        // Tests exist but none is selected
+        placeholder.innerHTML = `
+            <p>No test selected</p>
+            <p class="hint">Click a test in the Test Queue to edit it, or create a new one</p>
+        `;
+    } else {
+        // Default: editing a test but it's empty
+        placeholder.innerHTML = `
+            <p>�👆 Drag blocks here to build your transaction</p>
+            <p class="hint">Start with a Transaction Type block</p>
+        `;
+    }
+
     workspace.appendChild(placeholder);
 }
 
