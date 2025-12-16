@@ -2,6 +2,13 @@
 // Main application logic
 // Version 2.3.2 - Updated branding to "Playground"
 
+// Network endpoints
+const NETWORK_ENDPOINTS = {
+    mainnet: 'wss://xrplcluster.com',
+    testnet: 'wss://s.altnet.rippletest.net:51233',
+    devnet: 'wss://s.devnet.rippletest.net:51233'
+};
+
 // Global state
 let definitions = null;
 let transactions = [];  // Array of transaction objects
@@ -61,7 +68,6 @@ async function loadDefinitions() {
     try {
         const response = await fetch('definitions.json');
         definitions = await response.json();
-        console.log('Definitions loaded:', definitions);
     } catch (error) {
         console.error('Error loading definitions:', error);
         showValidationMessage('Failed to load definitions.json', 'error');
@@ -221,7 +227,6 @@ function renderTestQueue() {
         return;
     }
 
-    console.log('Rendering test queue with', transactions.length, 'transactions');
     queueContainer.innerHTML = '';
 
     if (transactions.length === 0) {
@@ -237,7 +242,6 @@ function renderTestQueue() {
     }
 
     transactions.forEach((transaction, index) => {
-        console.log('Creating queue item for:', transaction.name);
         const queueItem = createTestQueueItem(transaction, index + 1);
         queueContainer.appendChild(queueItem);
     });
@@ -514,13 +518,7 @@ async function runSingleTest(transactionId) {
     }
 
     // Get network endpoint
-    const networks = {
-        mainnet: 'wss://xrplcluster.com',
-        testnet: 'wss://s.altnet.rippletest.net:51233',
-        devnet: 'wss://s.devnet.rippletest.net:51233'
-    };
-
-    const endpoint = networks[currentNetwork];
+    const endpoint = NETWORK_ENDPOINTS[currentNetwork];
 
     try {
         // Update status to running
@@ -1079,7 +1077,6 @@ function showFieldsForTransactionType(typeName) {
             name: f.name,
             required: f.required === 0 // 0 = required, 1 = optional, 2 = default
         }));
-        console.log(`Found ${validFields.length} fields for ${typeName}:`, validFields.map(f => f.name));
     } else {
         console.warn(`No TRANSACTION_FORMATS found for ${typeName}`);
     }
@@ -1097,8 +1094,6 @@ function showFieldsForTransactionType(typeName) {
         if (a.required !== b.required) return a.required ? -1 : 1;
         return a.name.localeCompare(b.name);
     });
-
-    console.log(`Total fields to display: ${validFields.length}`);
 
     // Create field blocks
     validFields.forEach(field => {
@@ -1639,12 +1634,7 @@ function initializeNetworkManagement() {
 
 function updateNetworkInfo() {
     const networkInfo = document.getElementById('network-info');
-    const networks = {
-        mainnet: 'wss://xrplcluster.com',
-        testnet: 'wss://s.altnet.rippletest.net:51233',
-        devnet: 'wss://s.devnet.rippletest.net:51233'
-    };
-    networkInfo.textContent = `Connected to ${currentNetwork.charAt(0).toUpperCase() + currentNetwork.slice(1)} (${networks[currentNetwork]})`;
+    networkInfo.textContent = `Connected to ${currentNetwork.charAt(0).toUpperCase() + currentNetwork.slice(1)} (${NETWORK_ENDPOINTS[currentNetwork]})`;
 }
 
 function addAccount() {
@@ -1746,7 +1736,6 @@ async function fundAccount(address) {
 
         const data = await response.json();
         showMessage(`✅ Account funded! Balance: ${data.balance?.value || 'Unknown'} XRP`, 'success');
-        console.log('Faucet response:', data);
 
     } catch (error) {
         showMessage(`❌ Error funding account: ${error.message}`, 'error');
@@ -1836,21 +1825,13 @@ function renderAccounts() {
 }
 
 async function fetchAccountInfo(address, detailsElement) {
-    const networks = {
-        mainnet: 'wss://xrplcluster.com',
-        testnet: 'wss://s.altnet.rippletest.net:51233',
-        devnet: 'wss://s.devnet.rippletest.net:51233'
-    };
-
-    const endpoint = networks[currentNetwork];
+    const endpoint = NETWORK_ENDPOINTS[currentNetwork];
 
     try {
-        console.log(`Fetching account info for ${address} on ${currentNetwork}...`);
         detailsElement.innerHTML = '<span class="account-loading">Loading...</span>';
 
         const client = new xrpl.Client(endpoint);
         await client.connect();
-        console.log('Connected to network');
 
         const response = await client.request({
             command: 'account_info',
@@ -1858,27 +1839,21 @@ async function fetchAccountInfo(address, detailsElement) {
             ledger_index: 'validated'
         });
 
-        console.log('Account info response:', response);
-
         await client.disconnect();
 
         const balance = (parseInt(response.result.account_data.Balance) / 1000000).toFixed(2);
         const sequence = response.result.account_data.Sequence;
-
-        console.log(`Balance: ${balance} XRP, Sequence: ${sequence}`);
 
         detailsElement.innerHTML = `
             <span class="account-detail-item">💰 ${balance} XRP</span>
             <span class="account-detail-item">📊 Seq: ${sequence}</span>
         `;
     } catch (error) {
-        console.error('Error fetching account info:', error);
-        console.error('Error details:', error.data);
-
         if (error.data?.error === 'actNotFound') {
             detailsElement.innerHTML = '<span class="account-not-found">⚠️ Not funded</span>';
         } else {
-            detailsElement.innerHTML = `<span class="account-error">❌ ${error.message || 'Error'}</span>`;
+            detailsElement.innerHTML = `<span class="account-error">❌ Error</span>`;
+            console.error('Error fetching account info:', error);
         }
     }
 }
@@ -2020,13 +1995,7 @@ async function submitTransaction() {
     }
 
     // Get network endpoint
-    const networks = {
-        mainnet: 'wss://xrplcluster.com',
-        testnet: 'wss://s.altnet.rippletest.net:51233',
-        devnet: 'wss://s.devnet.rippletest.net:51233'
-    };
-
-    const endpoint = networks[currentNetwork];
+    const endpoint = NETWORK_ENDPOINTS[currentNetwork];
 
     try {
         showMessage(`🔄 Connecting to ${currentNetwork}...`, 'info');
@@ -2062,10 +2031,8 @@ async function submitTransaction() {
             const hash = result.result.hash;
             const explorerUrl = getExplorerUrl(hash, currentNetwork);
             showMessageWithLink(`✅ Transaction successful!`, hash, explorerUrl, 'success');
-            console.log('Transaction result:', result);
         } else {
             showMessage(`⚠️ Transaction failed: ${result.result.meta.TransactionResult}`, 'warning');
-            console.log('Transaction result:', result);
         }
 
     } catch (error) {
@@ -2132,7 +2099,6 @@ const STORAGE_KEYS = {
 function saveAccountsToStorage() {
     try {
         localStorage.setItem(STORAGE_KEYS.ACCOUNTS, JSON.stringify(accounts));
-        console.log('Accounts saved to local storage:', accounts.length);
     } catch (e) {
         console.error('Failed to save accounts to local storage:', e);
     }
@@ -2143,7 +2109,6 @@ function loadAccountsFromStorage() {
         const stored = localStorage.getItem(STORAGE_KEYS.ACCOUNTS);
         if (stored) {
             accounts = JSON.parse(stored);
-            console.log('Accounts loaded from local storage:', accounts.length);
             return true;
         }
     } catch (e) {
@@ -2160,7 +2125,6 @@ function saveTestsToStorage() {
             nextTransactionNumber: nextTransactionNumber
         };
         localStorage.setItem(STORAGE_KEYS.TESTS, JSON.stringify(testsData));
-        console.log('Tests saved to local storage:', transactions.length);
     } catch (e) {
         console.error('Failed to save tests to local storage:', e);
     }
@@ -2180,7 +2144,6 @@ function loadTestsFromStorage() {
                 currentTransactionId = transactions[0].id;
             }
 
-            console.log('Tests loaded from local storage:', transactions.length);
             return true;
         }
     } catch (e) {
@@ -2202,7 +2165,6 @@ function loadNetworkFromStorage() {
         const stored = localStorage.getItem(STORAGE_KEYS.CURRENT_NETWORK);
         if (stored) {
             currentNetwork = stored;
-            console.log('Network loaded from local storage:', currentNetwork);
             return true;
         }
     } catch (e) {
@@ -2216,7 +2178,6 @@ function clearAllStorage() {
         Object.values(STORAGE_KEYS).forEach(key => {
             localStorage.removeItem(key);
         });
-        console.log('All local storage cleared');
         showToast('Local storage cleared', 'success');
     } catch (e) {
         console.error('Failed to clear local storage:', e);
