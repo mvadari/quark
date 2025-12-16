@@ -70,7 +70,7 @@ async function loadDefinitions() {
         definitions = await response.json();
     } catch (error) {
         console.error('Error loading definitions:', error);
-        showValidationMessage('Failed to load definitions.json', 'error');
+        showToast('❌ Failed to load definitions.json', 'error');
     }
 }
 
@@ -722,29 +722,42 @@ function buildTransactionObjectFromTest(transaction) {
             console.log(`  → Object field, cleaned:`, cleanedObject);
             txObject[block.fieldName] = cleanedObject;
         } else {
-            // Convert value to string
-            const valueStr = String(block.value);
-
             // Get field info to determine type
             const fieldInfo = getFieldInfo(block.fieldName);
 
-            // For Amount fields, NEVER parse as JSON - always use convertFieldValue
-            // This ensures XRP amounts stay as strings
-            if (fieldInfo && fieldInfo.type === 'Amount') {
-                const converted = convertFieldValue(valueStr, fieldInfo);
-                console.log(`  → Amount field, converted:`, converted, `typeof: ${typeof converted}`);
-                txObject[block.fieldName] = converted;
+            // If value is already a number, use it directly (with unsigned conversion for UInt32)
+            if (typeof block.value === 'number') {
+                // For UInt32 fields (like Flags), ensure unsigned
+                if (fieldInfo && fieldInfo.type === 'UInt32') {
+                    const unsignedValue = block.value >>> 0;
+                    console.log(`  → UInt32 field, unsigned:`, unsignedValue, `(was ${block.value})`);
+                    txObject[block.fieldName] = unsignedValue;
+                } else {
+                    console.log(`  → Numeric field:`, block.value);
+                    txObject[block.fieldName] = block.value;
+                }
             } else {
-                // For other fields, try to parse as JSON for complex fields
-                try {
-                    const parsed = JSON.parse(valueStr);
-                    console.log(`  → Parsed as JSON:`, parsed);
-                    txObject[block.fieldName] = parsed;
-                } catch {
-                    // Use convertFieldValue if JSON parsing fails
+                // Convert value to string
+                const valueStr = String(block.value);
+
+                // For Amount fields, NEVER parse as JSON - always use convertFieldValue
+                // This ensures XRP amounts stay as strings
+                if (fieldInfo && fieldInfo.type === 'Amount') {
                     const converted = convertFieldValue(valueStr, fieldInfo);
-                    console.log(`  → Converted using fieldInfo (type: ${fieldInfo?.type}):`, converted, `typeof: ${typeof converted}`);
+                    console.log(`  → Amount field, converted:`, converted, `typeof: ${typeof converted}`);
                     txObject[block.fieldName] = converted;
+                } else {
+                    // For other fields, try to parse as JSON for complex fields
+                    try {
+                        const parsed = JSON.parse(valueStr);
+                        console.log(`  → Parsed as JSON:`, parsed);
+                        txObject[block.fieldName] = parsed;
+                    } catch {
+                        // Use convertFieldValue if JSON parsing fails
+                        const converted = convertFieldValue(valueStr, fieldInfo);
+                        console.log(`  → Converted using fieldInfo (type: ${fieldInfo?.type}):`, converted, `typeof: ${typeof converted}`);
+                        txObject[block.fieldName] = converted;
+                    }
                 }
             }
         }
@@ -1235,11 +1248,14 @@ function showFieldsForTransactionType(typeName) {
         console.warn(`No TRANSACTION_FORMATS found for ${typeName}`);
     }
 
-    // Always add common fields if not already present
-    const commonFields = ['Account', 'Fee', 'Sequence', 'LastLedgerSequence', 'SigningPubKey'];
-    commonFields.forEach(fieldName => {
-        if (!validFields.find(f => f.name === fieldName)) {
-            validFields.push({ name: fieldName, required: false });
+    // Always add common fields from definitions.json if not already present
+    const commonFieldsFromDef = definitions.TRANSACTION_FORMATS?.common || [];
+    commonFieldsFromDef.forEach(commonField => {
+        if (!validFields.find(f => f.name === commonField.name)) {
+            validFields.push({
+                name: commonField.name,
+                required: commonField.required === 0 // 0 = required, 1 = optional
+            });
         }
     });
 
@@ -1292,7 +1308,7 @@ function addFieldBlock(fieldName, blockType) {
     // Check if field already exists in current transaction
     const existing = transaction.blocks.find(b => b.fieldName === fieldName);
     if (existing) {
-        showValidationMessage(`Field "${fieldName}" already added`, 'warning');
+        showToast(`⚠️ Field "${fieldName}" already added`, 'warning');
         return;
     }
 
@@ -1361,11 +1377,12 @@ function createWorkspaceBlock(fieldName, blockType, value, isTransactionType) {
 
         block.appendChild(select);
     } else {
-        // Check if this is an Account field, Amount field, or Blob field
+        // Check if this is an Account field, Amount field, Blob field, or Flags field
         const fieldInfo = getFieldInfo(fieldName);
         const isAccountField = fieldInfo && fieldInfo.type === 'AccountID';
         const isAmountField = fieldInfo && fieldInfo.type === 'Amount';
         const isBlobField = fieldInfo && fieldInfo.type === 'Blob';
+        const isFlagsField = fieldName === 'Flags';
 
         if (isAccountField && accounts.length > 0) {
             // Create a container for input and dropdown
@@ -1513,6 +1530,10 @@ function createWorkspaceBlock(fieldName, blockType, value, isTransactionType) {
             blobContainer.appendChild(input);
             blobContainer.appendChild(convertBtn);
             block.appendChild(blobContainer);
+        } else if (isFlagsField) {
+            // Flags field with checkboxes for transaction-specific flags
+            const flagsContainer = createFlagsInput(fieldName, value);
+            block.appendChild(flagsContainer);
         } else {
             // Regular field is an input
             const input = document.createElement('input');
@@ -1540,6 +1561,125 @@ function createWorkspaceBlock(fieldName, blockType, value, isTransactionType) {
 
     wrapper.appendChild(block);
     return wrapper;
+}
+
+// Helper function for flags field input
+function createFlagsInput(fieldName, value) {
+    const container = document.createElement('div');
+    container.className = 'flags-container';
+
+    // Get current transaction type
+    const transaction = getCurrentTransaction();
+    const txType = transaction?.type;
+
+    if (!txType) {
+        const notice = document.createElement('div');
+        notice.className = 'flags-notice';
+        notice.textContent = 'Select a transaction type first';
+        notice.style.fontStyle = 'italic';
+        notice.style.color = '#999';
+        notice.style.fontSize = '0.75rem';
+        container.appendChild(notice);
+        return container;
+    }
+
+    // Get flags for this transaction type
+    const txFlags = definitions.TRANSACTION_FLAGS?.[txType] || {};
+    const universalFlags = definitions.TRANSACTION_FLAGS?.Universal || {};
+    const allFlags = { ...txFlags, ...universalFlags };
+
+    if (Object.keys(allFlags).length === 0) {
+        const notice = document.createElement('div');
+        notice.className = 'flags-notice';
+        notice.textContent = 'No flags available for this transaction type';
+        notice.style.fontStyle = 'italic';
+        notice.style.color = '#999';
+        notice.style.fontSize = '0.75rem';
+        container.appendChild(notice);
+        return container;
+    }
+
+    // Parse current value (could be a number or 0)
+    // Use >>> 0 to ensure unsigned 32-bit integer
+    let currentFlags = (parseInt(value) || 0) >>> 0;
+
+    // Create checkboxes for each flag
+    const checkboxContainer = document.createElement('div');
+    checkboxContainer.className = 'flags-checkboxes';
+
+    Object.entries(allFlags).sort((a, b) => a[0].localeCompare(b[0])).forEach(([flagName, flagValue]) => {
+        const flagItem = document.createElement('label');
+        flagItem.className = 'flag-item';
+
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.className = 'flag-checkbox';
+        checkbox.value = flagValue;
+        // Use unsigned comparison
+        checkbox.checked = ((currentFlags >>> 0) & (flagValue >>> 0)) !== 0;
+
+        checkbox.addEventListener('change', () => {
+            updateFlagsValue(fieldName);
+        });
+
+        const label = document.createElement('span');
+        label.className = 'flag-label';
+        label.textContent = `${flagName} (${flagValue})`;
+
+        flagItem.appendChild(checkbox);
+        flagItem.appendChild(label);
+        checkboxContainer.appendChild(flagItem);
+    });
+
+    container.appendChild(checkboxContainer);
+
+    // Add a numeric input for manual entry
+    const manualInput = document.createElement('input');
+    manualInput.type = 'number';
+    manualInput.className = 'flags-manual-input';
+    manualInput.placeholder = 'Or enter flags value manually';
+    manualInput.value = currentFlags || '';
+
+    manualInput.addEventListener('input', (e) => {
+        const newValue = (parseInt(e.target.value) || 0) >>> 0;
+        updateFieldValue(fieldName, newValue);
+        // Update checkboxes to reflect manual value
+        const checkboxes = container.querySelectorAll('.flag-checkbox');
+        checkboxes.forEach(cb => {
+            const flagValue = parseInt(cb.value) >>> 0;
+            cb.checked = ((newValue >>> 0) & flagValue) !== 0;
+        });
+    });
+
+    container.appendChild(manualInput);
+
+    return container;
+}
+
+function updateFlagsValue(fieldName) {
+    const transaction = getCurrentTransaction();
+    if (!transaction) return;
+
+    const block = document.querySelector(`[data-field="${fieldName}"]`);
+    if (!block) return;
+
+    const checkboxes = block.querySelectorAll('.flag-checkbox:checked');
+    let flagsValue = 0;
+
+    checkboxes.forEach(cb => {
+        flagsValue |= parseInt(cb.value);
+    });
+
+    // Convert to unsigned 32-bit integer to avoid negative values
+    flagsValue = flagsValue >>> 0;
+
+    // Update the manual input
+    const manualInput = block.querySelector('.flags-manual-input');
+    if (manualInput) {
+        manualInput.value = flagsValue || '';
+    }
+
+    updateFieldValue(fieldName, flagsValue);
 }
 
 // Helper functions for amount field inputs
@@ -1721,7 +1861,6 @@ function clearWorkspace() {
 
     renderWorkspace();
     updateJSONOutput();
-    clearValidationMessages();
 }
 
 // JSON Output Generation
@@ -1729,8 +1868,6 @@ function updateJSONOutput() {
     const transaction = buildTransactionObject();
     const jsonOutput = document.getElementById('json-output');
     jsonOutput.textContent = JSON.stringify(transaction, null, 2);
-
-    validateTransaction(transaction);
 }
 
 function buildTransactionObject() {
@@ -1796,51 +1933,18 @@ function convertFieldValue(value, fieldInfo) {
     // Convert numeric types (but not Amount!)
     if (type.startsWith('UInt') || type === 'Number') {
         const num = parseInt(value, 10);
-        return isNaN(num) ? value : num;
+        if (isNaN(num)) return value;
+
+        // For UInt32, ensure unsigned conversion to avoid negative values
+        if (type === 'UInt32') {
+            return num >>> 0;
+        }
+
+        return num;
     }
 
     // Keep strings as-is for now
     return value;
-}
-
-// Validation
-function validateTransaction(transaction) {
-    clearValidationMessages();
-
-    if (!transaction.TransactionType) {
-        showValidationMessage('⚠️ Transaction Type is required', 'error');
-        return;
-    }
-
-    // Check for required common fields
-    const warnings = [];
-
-    if (!transaction.Account) {
-        warnings.push('💡 Account field is recommended');
-    }
-
-    if (!transaction.Fee) {
-        warnings.push('💡 Fee field is recommended');
-    }
-
-    if (warnings.length > 0) {
-        warnings.forEach(warning => showValidationMessage(warning, 'warning'));
-    } else {
-        showValidationMessage('✅ Transaction structure looks good!', 'success');
-    }
-}
-
-function showValidationMessage(message, type) {
-    const container = document.getElementById('validation-messages');
-    const messageDiv = document.createElement('div');
-    messageDiv.className = `validation-message ${type}`;
-    messageDiv.textContent = message;
-    container.appendChild(messageDiv);
-}
-
-function clearValidationMessages() {
-    const container = document.getElementById('validation-messages');
-    container.innerHTML = '';
 }
 
 // Utility Functions
@@ -1850,14 +1954,13 @@ function copyJSON() {
     const btn = document.getElementById('copy-json');
 
     navigator.clipboard.writeText(text).then(() => {
-        showValidationMessage('✅ JSON copied to clipboard!', 'success');
+        showToast('✅ JSON copied to clipboard!', 'success');
         btn.classList.add('success-flash');
         setTimeout(() => {
-            clearValidationMessages();
             btn.classList.remove('success-flash');
         }, 2000);
     }).catch(err => {
-        showValidationMessage('❌ Failed to copy JSON', 'error');
+        showToast('❌ Failed to copy JSON', 'error');
     });
 }
 
@@ -1876,10 +1979,9 @@ function downloadJSON() {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
 
-    showValidationMessage('✅ JSON downloaded!', 'success');
+    showToast('✅ JSON downloaded!', 'success');
     btn.classList.add('success-flash');
     setTimeout(() => {
-        clearValidationMessages();
         btn.classList.remove('success-flash');
     }, 2000);
 }
@@ -1981,10 +2083,7 @@ function initializeKeyboardShortcuts() {
             downloadJSON();
         }
 
-        // Escape to clear validation messages
-        if (e.key === 'Escape') {
-            clearValidationMessages();
-        }
+
     });
 }
 
