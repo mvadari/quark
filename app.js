@@ -219,6 +219,87 @@ function renderActiveTransaction(transaction) {
     workspace.appendChild(container);
 }
 
+function createSearchableDropdown(initialValue, onChange) {
+    const container = document.createElement('div');
+    container.className = 'searchable-dropdown';
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'searchable-dropdown-input';
+    input.value = initialValue;
+    input.placeholder = 'Type to search...';
+
+    const dropdown = document.createElement('div');
+    dropdown.className = 'searchable-dropdown-list';
+    dropdown.style.display = 'none';
+
+    // Get all result codes
+    const resultCodes = definitions.TRANSACTION_RESULTS
+        ? Object.keys(definitions.TRANSACTION_RESULTS).sort()
+        : ['tesSUCCESS', 'tecNO_DST', 'tecUNFUNDED_PAYMENT'];
+
+    let filteredCodes = [...resultCodes];
+
+    const renderDropdown = () => {
+        dropdown.innerHTML = '';
+        filteredCodes.forEach(code => {
+            const item = document.createElement('div');
+            item.className = 'searchable-dropdown-item';
+            item.textContent = code;
+            item.addEventListener('mousedown', (e) => {
+                e.preventDefault(); // Prevent blur
+                input.value = code;
+                dropdown.style.display = 'none';
+                onChange(code);
+            });
+            dropdown.appendChild(item);
+        });
+
+        if (filteredCodes.length === 0) {
+            const noResults = document.createElement('div');
+            noResults.className = 'searchable-dropdown-item';
+            noResults.textContent = 'No results';
+            noResults.style.fontStyle = 'italic';
+            noResults.style.color = '#999';
+            dropdown.appendChild(noResults);
+        }
+    };
+
+    input.addEventListener('focus', () => {
+        filteredCodes = [...resultCodes];
+        renderDropdown();
+        dropdown.style.display = 'block';
+    });
+
+    input.addEventListener('blur', () => {
+        setTimeout(() => {
+            dropdown.style.display = 'none';
+        }, 200);
+    });
+
+    input.addEventListener('input', (e) => {
+        const searchTerm = e.target.value.toLowerCase();
+        filteredCodes = resultCodes.filter(code =>
+            code.toLowerCase().includes(searchTerm)
+        );
+        renderDropdown();
+        dropdown.style.display = 'block';
+    });
+
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && filteredCodes.length > 0) {
+            input.value = filteredCodes[0];
+            dropdown.style.display = 'none';
+            onChange(filteredCodes[0]);
+        }
+    });
+
+    container.appendChild(input);
+    container.appendChild(dropdown);
+
+    return container;
+}
+
 function renderTestQueue() {
     // Render in the right panel
     const queueContainer = document.getElementById('test-queue-right');
@@ -321,24 +402,17 @@ function createTestQueueItem(transaction, number) {
     expectedLabel.style.color = '#666';
     expectedLabel.style.marginRight = '0.25rem';
 
-    const expectedSelect = document.createElement('select');
-    expectedSelect.className = 'test-queue-expected-select';
-    expectedSelect.innerHTML = `
-        <option value="tesSUCCESS" ${transaction.expectedResult === 'tesSUCCESS' ? 'selected' : ''}>tesSUCCESS</option>
-        <option value="tecNO_DST" ${transaction.expectedResult === 'tecNO_DST' ? 'selected' : ''}>tecNO_DST</option>
-        <option value="tecUNFUNDED_PAYMENT" ${transaction.expectedResult === 'tecUNFUNDED_PAYMENT' ? 'selected' : ''}>tecUNFUNDED_PAYMENT</option>
-        <option value="tecNO_PERMISSION" ${transaction.expectedResult === 'tecNO_PERMISSION' ? 'selected' : ''}>tecNO_PERMISSION</option>
-        <option value="temBAD_FEE" ${transaction.expectedResult === 'temBAD_FEE' ? 'selected' : ''}>temBAD_FEE</option>
-        <option value="tefPAST_SEQ" ${transaction.expectedResult === 'tefPAST_SEQ' ? 'selected' : ''}>tefPAST_SEQ</option>
-    `;
-    expectedSelect.addEventListener('change', (e) => {
-        e.stopPropagation();
-        transaction.expectedResult = e.target.value;
-        saveTestsToStorage();
-    });
+    // Create searchable dropdown for expected result
+    const expectedSelectContainer = createSearchableDropdown(
+        transaction.expectedResult || 'tesSUCCESS',
+        (value) => {
+            transaction.expectedResult = value;
+            saveTestsToStorage();
+        }
+    );
 
     expectedResultDiv.appendChild(expectedLabel);
-    expectedResultDiv.appendChild(expectedSelect);
+    expectedResultDiv.appendChild(expectedSelectContainer);
 
     // Actions
     const actionsDiv = document.createElement('div');
@@ -528,6 +602,9 @@ async function runSingleTest(transactionId) {
 
         showToast(`🔄 Running: ${transaction.name}`, 'info', 3000);
 
+        // Log the transaction object for debugging
+        console.log('Transaction object to submit:', JSON.stringify(txObject, null, 2));
+
         const client = new xrpl.Client(endpoint);
         await client.connect();
 
@@ -539,8 +616,26 @@ async function runSingleTest(transactionId) {
             txObject.Account = wallet.address;
         }
 
+        // Set LastLedgerSequence if not already set (current ledger + 5)
+        // This makes failed transactions fail faster instead of waiting indefinitely
+        if (!txObject.LastLedgerSequence) {
+            const ledgerInfo = await client.request({ command: 'ledger', ledger_index: 'validated' });
+            txObject.LastLedgerSequence = ledgerInfo.result.ledger_index + 5;
+        }
+
+        // Clean the transaction object - remove any undefined/null/empty values
+        const cleanedTxObject = {};
+        Object.keys(txObject).forEach(key => {
+            const value = txObject[key];
+            if (value !== undefined && value !== null && value !== '') {
+                cleanedTxObject[key] = value;
+            }
+        });
+
+        console.log('Cleaned transaction object:', JSON.stringify(cleanedTxObject, null, 2));
+
         // Submit and wait for validation
-        const result = await client.submitAndWait(txObject, {
+        const result = await client.submitAndWait(cleanedTxObject, {
             autofill: true,
             wallet: wallet
         });
@@ -572,11 +667,37 @@ async function runSingleTest(transactionId) {
         saveTestsToStorage();
 
     } catch (error) {
-        updateTransactionStatus(transactionId, 'failed', error.message);
-        showToast(`❌ ${transaction.name}: ${error.message}`, 'error', 7000);
+        console.error('Test execution error:', error);
+
+        // Check if the error contains a transaction result code
+        // xrpl.js throws errors for tem/tef/tel errors, but they might be expected
+        let actualResult = null;
+
+        // Try to extract the result code from the error message
+        // Error messages can be in formats like:
+        // - "Transaction failed, temREDUNDANT: The transaction is redundant."
+        // - "temREDUNDANT: The transaction is redundant."
+        // - "temREDUNDANT"
+        const resultCodeMatch = error.message.match(/(te[cflmrs][A-Z_]+)/);
+        if (resultCodeMatch) {
+            actualResult = resultCodeMatch[1];
+        } else {
+            actualResult = error.message;
+        }
+
+        transaction.actualResult = actualResult;
+
+        // Check if this error was expected
+        if (actualResult === transaction.expectedResult) {
+            updateTransactionStatus(transactionId, 'passed', actualResult);
+            showToast(`✅ ${transaction.name}: ${actualResult} (as expected)`, 'success', 5000);
+        } else {
+            updateTransactionStatus(transactionId, 'failed', actualResult);
+            showToast(`❌ ${transaction.name}: Expected ${transaction.expectedResult}, got ${actualResult}`, 'error', 7000);
+        }
+
         renderTestQueue();
         saveTestsToStorage();
-        console.error('Test execution error:', error);
     }
 }
 
@@ -587,16 +708,49 @@ function buildTransactionObjectFromTest(transaction) {
 
     // Add all blocks
     transaction.blocks.forEach(block => {
-        try {
-            // Try to parse as JSON for complex fields
-            const parsed = JSON.parse(block.value);
-            txObject[block.fieldName] = parsed;
-        } catch {
-            // Use as string if not valid JSON
-            txObject[block.fieldName] = block.value;
+        if (!block.value) return;  // Skip empty values
+
+        console.log(`Processing block: ${block.fieldName}, value:`, block.value, `type: ${typeof block.value}`);
+
+        // If value is already an object (IOU/MPT), use it directly
+        if (typeof block.value === 'object') {
+            // Ensure IOU/MPT values are strings
+            const cleanedObject = {};
+            Object.keys(block.value).forEach(key => {
+                cleanedObject[key] = String(block.value[key]);
+            });
+            console.log(`  → Object field, cleaned:`, cleanedObject);
+            txObject[block.fieldName] = cleanedObject;
+        } else {
+            // Convert value to string
+            const valueStr = String(block.value);
+
+            // Get field info to determine type
+            const fieldInfo = getFieldInfo(block.fieldName);
+
+            // For Amount fields, NEVER parse as JSON - always use convertFieldValue
+            // This ensures XRP amounts stay as strings
+            if (fieldInfo && fieldInfo.type === 'Amount') {
+                const converted = convertFieldValue(valueStr, fieldInfo);
+                console.log(`  → Amount field, converted:`, converted, `typeof: ${typeof converted}`);
+                txObject[block.fieldName] = converted;
+            } else {
+                // For other fields, try to parse as JSON for complex fields
+                try {
+                    const parsed = JSON.parse(valueStr);
+                    console.log(`  → Parsed as JSON:`, parsed);
+                    txObject[block.fieldName] = parsed;
+                } catch {
+                    // Use convertFieldValue if JSON parsing fails
+                    const converted = convertFieldValue(valueStr, fieldInfo);
+                    console.log(`  → Converted using fieldInfo (type: ${fieldInfo?.type}):`, converted, `typeof: ${typeof converted}`);
+                    txObject[block.fieldName] = converted;
+                }
+            }
         }
     });
 
+    console.log('Final txObject:', txObject);
     return txObject;
 }
 
@@ -1207,9 +1361,11 @@ function createWorkspaceBlock(fieldName, blockType, value, isTransactionType) {
 
         block.appendChild(select);
     } else {
-        // Check if this is an Account field
+        // Check if this is an Account field, Amount field, or Blob field
         const fieldInfo = getFieldInfo(fieldName);
         const isAccountField = fieldInfo && fieldInfo.type === 'AccountID';
+        const isAmountField = fieldInfo && fieldInfo.type === 'Amount';
+        const isBlobField = fieldInfo && fieldInfo.type === 'Blob';
 
         if (isAccountField && accounts.length > 0) {
             // Create a container for input and dropdown
@@ -1260,6 +1416,103 @@ function createWorkspaceBlock(fieldName, blockType, value, isTransactionType) {
             inputContainer.appendChild(input);
             inputContainer.appendChild(accountSelect);
             block.appendChild(inputContainer);
+        } else if (isAmountField) {
+            // Amount field with XRP/IOU/MPT toggle
+            const amountContainer = document.createElement('div');
+            amountContainer.className = 'amount-container';
+
+            // Toggle buttons
+            const toggleContainer = document.createElement('div');
+            toggleContainer.className = 'amount-toggle';
+
+            const xrpBtn = document.createElement('button');
+            xrpBtn.className = 'amount-toggle-btn active';
+            xrpBtn.textContent = 'XRP';
+            xrpBtn.dataset.type = 'xrp';
+
+            const iouBtn = document.createElement('button');
+            iouBtn.className = 'amount-toggle-btn';
+            iouBtn.textContent = 'IOU';
+            iouBtn.dataset.type = 'iou';
+
+            const mptBtn = document.createElement('button');
+            mptBtn.className = 'amount-toggle-btn';
+            mptBtn.textContent = 'MPT';
+            mptBtn.dataset.type = 'mpt';
+
+            toggleContainer.appendChild(xrpBtn);
+            toggleContainer.appendChild(iouBtn);
+            toggleContainer.appendChild(mptBtn);
+
+            // Input area
+            const inputArea = document.createElement('div');
+            inputArea.className = 'amount-input-area';
+
+            // Create XRP input (default)
+            const xrpInput = createXRPInput(fieldName, value);
+            inputArea.appendChild(xrpInput);
+
+            // Toggle button handlers
+            [xrpBtn, iouBtn, mptBtn].forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    // Update active state
+                    toggleContainer.querySelectorAll('.amount-toggle-btn').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+
+                    // Clear and rebuild input area
+                    inputArea.innerHTML = '';
+                    const type = btn.dataset.type;
+
+                    if (type === 'xrp') {
+                        inputArea.appendChild(createXRPInput(fieldName, ''));
+                    } else if (type === 'iou') {
+                        inputArea.appendChild(createIOUInput(fieldName));
+                    } else if (type === 'mpt') {
+                        inputArea.appendChild(createMPTInput(fieldName));
+                    }
+                });
+            });
+
+            amountContainer.appendChild(toggleContainer);
+            amountContainer.appendChild(inputArea);
+            block.appendChild(amountContainer);
+        } else if (isBlobField) {
+            // Blob field with "Convert to Hex" button
+            const blobContainer = document.createElement('div');
+            blobContainer.className = 'blob-container';
+
+            const input = document.createElement('input');
+            input.className = 'block-input blob-input';
+            input.type = 'text';
+            input.placeholder = `Enter ${fieldName} (ASCII or hex)`;
+            input.value = value;
+
+            input.addEventListener('input', (e) => {
+                updateFieldValue(fieldName, e.target.value);
+            });
+
+            const convertBtn = document.createElement('button');
+            convertBtn.className = 'blob-convert-btn';
+            convertBtn.textContent = '→ Hex';
+            convertBtn.title = 'Convert ASCII to hex';
+            convertBtn.addEventListener('click', (e) => {
+                e.preventDefault();
+                const asciiText = input.value;
+                if (asciiText) {
+                    // Convert ASCII to hex
+                    const hexValue = Array.from(asciiText)
+                        .map(char => char.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'))
+                        .join('');
+                    input.value = hexValue;
+                    updateFieldValue(fieldName, hexValue);
+                    updateJSONOutput();
+                }
+            });
+
+            blobContainer.appendChild(input);
+            blobContainer.appendChild(convertBtn);
+            block.appendChild(blobContainer);
         } else {
             // Regular field is an input
             const input = document.createElement('input');
@@ -1287,6 +1540,114 @@ function createWorkspaceBlock(fieldName, blockType, value, isTransactionType) {
 
     wrapper.appendChild(block);
     return wrapper;
+}
+
+// Helper functions for amount field inputs
+function createXRPInput(fieldName, value) {
+    const input = document.createElement('input');
+    input.className = 'block-input amount-xrp-input';
+    input.type = 'text';
+    input.placeholder = 'Amount in drops (e.g., 1000000)';
+    input.value = value;
+
+    input.addEventListener('input', (e) => {
+        updateFieldValue(fieldName, e.target.value);
+    });
+
+    return input;
+}
+
+function createIOUInput(fieldName) {
+    const container = document.createElement('div');
+    container.className = 'amount-iou-container';
+
+    // Currency input
+    const currencyInput = document.createElement('input');
+    currencyInput.className = 'block-input amount-sub-input';
+    currencyInput.type = 'text';
+    currencyInput.placeholder = 'Currency (e.g., USD)';
+    currencyInput.dataset.subfield = 'currency';
+
+    // Issuer input
+    const issuerInput = document.createElement('input');
+    issuerInput.className = 'block-input amount-sub-input';
+    issuerInput.type = 'text';
+    issuerInput.placeholder = 'Issuer address';
+    issuerInput.dataset.subfield = 'issuer';
+
+    // Value input
+    const valueInput = document.createElement('input');
+    valueInput.className = 'block-input amount-sub-input';
+    valueInput.type = 'text';
+    valueInput.placeholder = 'Value (e.g., 100)';
+    valueInput.dataset.subfield = 'value';
+
+    // Update handler
+    const updateIOUValue = () => {
+        const currency = currencyInput.value.trim();
+        const issuer = issuerInput.value.trim();
+        const value = valueInput.value.trim();
+
+        if (currency && issuer && value) {
+            const iouObject = {
+                currency: currency,
+                issuer: issuer,
+                value: value
+            };
+            updateFieldValue(fieldName, iouObject);
+        }
+    };
+
+    currencyInput.addEventListener('input', updateIOUValue);
+    issuerInput.addEventListener('input', updateIOUValue);
+    valueInput.addEventListener('input', updateIOUValue);
+
+    container.appendChild(currencyInput);
+    container.appendChild(issuerInput);
+    container.appendChild(valueInput);
+
+    return container;
+}
+
+function createMPTInput(fieldName) {
+    const container = document.createElement('div');
+    container.className = 'amount-mpt-container';
+
+    // MPT Issuance ID input
+    const mptIdInput = document.createElement('input');
+    mptIdInput.className = 'block-input amount-sub-input';
+    mptIdInput.type = 'text';
+    mptIdInput.placeholder = 'MPT Issuance ID (hex)';
+    mptIdInput.dataset.subfield = 'mpt_issuance_id';
+
+    // Value input
+    const valueInput = document.createElement('input');
+    valueInput.className = 'block-input amount-sub-input';
+    valueInput.type = 'text';
+    valueInput.placeholder = 'Value (e.g., 100)';
+    valueInput.dataset.subfield = 'value';
+
+    // Update handler
+    const updateMPTValue = () => {
+        const mptId = mptIdInput.value.trim();
+        const value = valueInput.value.trim();
+
+        if (mptId && value) {
+            const mptObject = {
+                mpt_issuance_id: mptId,
+                value: value
+            };
+            updateFieldValue(fieldName, mptObject);
+        }
+    };
+
+    mptIdInput.addEventListener('input', updateMPTValue);
+    valueInput.addEventListener('input', updateMPTValue);
+
+    container.appendChild(mptIdInput);
+    container.appendChild(valueInput);
+
+    return container;
 }
 
 function updateFieldValue(fieldName, value) {
@@ -1387,13 +1748,28 @@ function buildTransactionObject() {
 
     // Add fields with values
     blocks.forEach(block => {
-        // Convert value to string if it's not already
-        const valueStr = typeof block.value === 'string' ? block.value : String(block.value);
+        if (block.value) {
+            // Check if value is already an object (IOU/MPT)
+            if (typeof block.value === 'object') {
+                // Ensure IOU/MPT values are strings
+                const cleanedObject = {};
+                Object.keys(block.value).forEach(key => {
+                    cleanedObject[key] = String(block.value[key]);
+                });
+                transaction[block.fieldName] = cleanedObject;
+            } else {
+                // Convert value to string if it's not already
+                const valueStr = typeof block.value === 'string' ? block.value : String(block.value);
 
-        if (block.value && valueStr.trim() !== '') {
-            // Try to convert to appropriate type
-            const fieldInfo = getFieldInfo(block.fieldName);
-            transaction[block.fieldName] = convertFieldValue(valueStr, fieldInfo);
+                if (valueStr.trim() !== '') {
+                    // Get field info to determine type
+                    const fieldInfo = getFieldInfo(block.fieldName);
+
+                    // For Amount fields, always use convertFieldValue (never parse as JSON)
+                    // This ensures XRP amounts stay as strings
+                    transaction[block.fieldName] = convertFieldValue(valueStr, fieldInfo);
+                }
+            }
         }
     });
 
@@ -1410,7 +1786,14 @@ function convertFieldValue(value, fieldInfo) {
 
     const type = fieldInfo.type;
 
-    // Convert numeric types
+    // Amount fields must remain as strings (for XRP drops) or objects (for IOU/MPT)
+    // Never convert Amount to a number
+    if (type === 'Amount') {
+        // Ensure it's a string
+        return String(value);
+    }
+
+    // Convert numeric types (but not Amount!)
     if (type.startsWith('UInt') || type === 'Number') {
         const num = parseInt(value, 10);
         return isNaN(num) ? value : num;
@@ -1502,7 +1885,12 @@ function downloadJSON() {
 }
 
 function loadExample(exampleType = 'payment') {
-    clearWorkspace();
+    // Clear only the current transaction, not all transactions
+    const transaction = getCurrentTransaction();
+    if (transaction) {
+        transaction.type = null;
+        transaction.blocks = [];
+    }
 
     const examples = {
         payment: {
@@ -1555,6 +1943,8 @@ function loadExample(exampleType = 'payment') {
 
         setTimeout(() => {
             updateJSONOutput();
+            renderTestQueue();  // Update test queue to reflect changes
+            saveTestsToStorage();  // Save to storage
         }, example.fields.length * 100 + 100);
     }, 100);
 }
