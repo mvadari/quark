@@ -307,6 +307,35 @@ function createTestQueueItem(transaction, number) {
     typeSpan.className = 'test-queue-type';
     typeSpan.textContent = transaction.type || 'No type';
 
+    // Expected result selector
+    const expectedResultDiv = document.createElement('div');
+    expectedResultDiv.className = 'test-queue-expected';
+
+    const expectedLabel = document.createElement('span');
+    expectedLabel.textContent = 'Expect:';
+    expectedLabel.style.fontSize = '0.75rem';
+    expectedLabel.style.color = '#666';
+    expectedLabel.style.marginRight = '0.25rem';
+
+    const expectedSelect = document.createElement('select');
+    expectedSelect.className = 'test-queue-expected-select';
+    expectedSelect.innerHTML = `
+        <option value="tesSUCCESS" ${transaction.expectedResult === 'tesSUCCESS' ? 'selected' : ''}>tesSUCCESS</option>
+        <option value="tecNO_DST" ${transaction.expectedResult === 'tecNO_DST' ? 'selected' : ''}>tecNO_DST</option>
+        <option value="tecUNFUNDED_PAYMENT" ${transaction.expectedResult === 'tecUNFUNDED_PAYMENT' ? 'selected' : ''}>tecUNFUNDED_PAYMENT</option>
+        <option value="tecNO_PERMISSION" ${transaction.expectedResult === 'tecNO_PERMISSION' ? 'selected' : ''}>tecNO_PERMISSION</option>
+        <option value="temBAD_FEE" ${transaction.expectedResult === 'temBAD_FEE' ? 'selected' : ''}>temBAD_FEE</option>
+        <option value="tefPAST_SEQ" ${transaction.expectedResult === 'tefPAST_SEQ' ? 'selected' : ''}>tefPAST_SEQ</option>
+    `;
+    expectedSelect.addEventListener('change', (e) => {
+        e.stopPropagation();
+        transaction.expectedResult = e.target.value;
+        saveTestsToStorage();
+    });
+
+    expectedResultDiv.appendChild(expectedLabel);
+    expectedResultDiv.appendChild(expectedSelect);
+
     // Actions
     const actionsDiv = document.createElement('div');
     actionsDiv.className = 'test-queue-actions';
@@ -348,6 +377,7 @@ function createTestQueueItem(transaction, number) {
     item.appendChild(statusSpan);
     item.appendChild(nameSpan);
     item.appendChild(typeSpan);
+    item.appendChild(expectedResultDiv);
     item.appendChild(actionsDiv);
 
     return item;
@@ -355,8 +385,18 @@ function createTestQueueItem(transaction, number) {
 
 function switchToTransaction(transactionId) {
     currentTransactionId = transactionId;
+
+    // Get the transaction we're switching to
+    const transaction = getCurrentTransaction();
+
     renderWorkspace();
     updateTransactionTypeSectionVisibility();
+
+    // If the transaction has a type, show the fields for that type
+    if (transaction && transaction.type) {
+        showFieldsForTransactionType(transaction.type);
+    }
+
     updateCurrentTestLabel();
     updateJSONOutput();
     saveTestsToStorage();
@@ -406,7 +446,16 @@ function handleAddTest() {
 }
 
 async function runAllTests() {
-    showMessage('🚀 Running all tests...', 'info');
+    showToast('🚀 Running all tests...', 'info', 3000);
+
+    // Reset all test statuses
+    transactions.forEach(tx => {
+        tx.status = 'pending';
+        tx.actualResult = null;
+        tx.hash = null;
+        tx.submittedAt = null;
+    });
+    renderTestQueue();
 
     for (const transaction of transactions) {
         await runSingleTest(transaction.id);
@@ -417,10 +466,12 @@ async function runAllTests() {
     const failed = transactions.filter(tx => tx.status === 'failed').length;
     const total = transactions.length;
 
+    renderTestResultsSummary();
+
     if (failed === 0) {
-        showMessage(`✅ All tests passed! (${passed}/${total})`, 'success');
+        showToast(`✅ All tests passed! (${passed}/${total})`, 'success', 5000);
     } else {
-        showMessage(`⚠️ Tests complete: ${passed} passed, ${failed} failed (${total} total)`, 'warning');
+        showToast(`⚠️ Tests complete: ${passed} passed, ${failed} failed (${total} total)`, 'warning', 7000);
     }
 }
 
@@ -434,8 +485,312 @@ async function runCurrentTest() {
 }
 
 async function runSingleTest(transactionId) {
-    // This will be implemented in the next phase
-    showMessage('🚧 Test execution coming soon...', 'info');
+    const transaction = transactions.find(tx => tx.id === transactionId);
+    if (!transaction) {
+        showToast('❌ Test not found', 'error');
+        return;
+    }
+
+    // Check if transaction has a type
+    if (!transaction.type) {
+        showToast(`❌ ${transaction.name}: No transaction type set`, 'error');
+        updateTransactionStatus(transactionId, 'failed', 'No transaction type');
+        renderTestQueue();
+        saveTestsToStorage();
+        return;
+    }
+
+    // Build transaction object from blocks
+    const txObject = buildTransactionObjectFromTest(transaction);
+
+    // Check if we have an account with a seed
+    const signingAccount = accounts.find(acc => acc.seed);
+    if (!signingAccount) {
+        showToast('❌ No account with signing key available. Generate an account first.', 'error');
+        updateTransactionStatus(transactionId, 'failed', 'No signing account');
+        renderTestQueue();
+        saveTestsToStorage();
+        return;
+    }
+
+    // Get network endpoint
+    const networks = {
+        mainnet: 'wss://xrplcluster.com',
+        testnet: 'wss://s.altnet.rippletest.net:51233',
+        devnet: 'wss://s.devnet.rippletest.net:51233'
+    };
+
+    const endpoint = networks[currentNetwork];
+
+    try {
+        // Update status to running
+        updateTransactionStatus(transactionId, 'running');
+        renderTestQueue();
+        saveTestsToStorage();
+
+        showToast(`🔄 Running: ${transaction.name}`, 'info', 3000);
+
+        const client = new xrpl.Client(endpoint);
+        await client.connect();
+
+        // Create wallet from seed
+        const wallet = xrpl.Wallet.fromSeed(signingAccount.seed);
+
+        // Auto-fill Account field if not set
+        if (!txObject.Account) {
+            txObject.Account = wallet.address;
+        }
+
+        // Submit and wait for validation
+        const result = await client.submitAndWait(txObject, {
+            autofill: true,
+            wallet: wallet
+        });
+
+        await client.disconnect();
+
+        const actualResult = result.result.meta.TransactionResult;
+        const hash = result.result.hash;
+
+        // Update transaction with results
+        transaction.actualResult = actualResult;
+        transaction.hash = hash;
+        transaction.submittedAt = new Date().toISOString();
+
+        // Determine pass/fail
+        if (actualResult === transaction.expectedResult) {
+            updateTransactionStatus(transactionId, 'passed', actualResult);
+            const explorerUrl = getExplorerUrl(hash, currentNetwork);
+            showToast(`✅ ${transaction.name}: ${actualResult}`, 'success', 5000, {
+                text: 'View in Explorer',
+                url: explorerUrl
+            });
+        } else {
+            updateTransactionStatus(transactionId, 'failed', actualResult);
+            showToast(`❌ ${transaction.name}: Expected ${transaction.expectedResult}, got ${actualResult}`, 'error', 7000);
+        }
+
+        renderTestQueue();
+        saveTestsToStorage();
+
+    } catch (error) {
+        updateTransactionStatus(transactionId, 'failed', error.message);
+        showToast(`❌ ${transaction.name}: ${error.message}`, 'error', 7000);
+        renderTestQueue();
+        saveTestsToStorage();
+        console.error('Test execution error:', error);
+    }
+}
+
+function buildTransactionObjectFromTest(transaction) {
+    const txObject = {
+        TransactionType: transaction.type
+    };
+
+    // Add all blocks
+    transaction.blocks.forEach(block => {
+        try {
+            // Try to parse as JSON for complex fields
+            const parsed = JSON.parse(block.value);
+            txObject[block.fieldName] = parsed;
+        } catch {
+            // Use as string if not valid JSON
+            txObject[block.fieldName] = block.value;
+        }
+    });
+
+    return txObject;
+}
+
+// Test Results & Reporting
+function renderTestResultsSummary() {
+    const summaryContainer = document.getElementById('test-results-summary');
+    const downloadBtn = document.getElementById('download-report-btn');
+
+    if (!summaryContainer) return;
+
+    // Check if any tests have been run
+    const hasResults = transactions.some(tx => tx.status === 'passed' || tx.status === 'failed');
+
+    if (!hasResults) {
+        summaryContainer.style.display = 'none';
+        downloadBtn.style.display = 'none';
+        return;
+    }
+
+    summaryContainer.style.display = 'block';
+    downloadBtn.style.display = 'inline-block';
+
+    const passed = transactions.filter(tx => tx.status === 'passed').length;
+    const failed = transactions.filter(tx => tx.status === 'failed').length;
+    const total = transactions.length;
+    const passRate = total > 0 ? Math.round((passed / total) * 100) : 0;
+
+    summaryContainer.innerHTML = `
+        <h3>Test Results</h3>
+        <div class="results-stats">
+            <div class="result-stat">
+                <div class="result-stat-value total">${total}</div>
+                <div class="result-stat-label">Total</div>
+            </div>
+            <div class="result-stat">
+                <div class="result-stat-value passed">${passed}</div>
+                <div class="result-stat-label">Passed</div>
+            </div>
+            <div class="result-stat">
+                <div class="result-stat-value failed">${failed}</div>
+                <div class="result-stat-label">Failed</div>
+            </div>
+            <div class="result-stat">
+                <div class="result-stat-value ${passRate === 100 ? 'passed' : 'total'}">${passRate}%</div>
+                <div class="result-stat-label">Pass Rate</div>
+            </div>
+        </div>
+        <div class="results-details">
+            ${transactions.map(tx => {
+                if (tx.status !== 'passed' && tx.status !== 'failed') return '';
+
+                const explorerUrl = tx.hash ? getExplorerUrl(tx.hash, currentNetwork) : null;
+
+                return `
+                    <div class="result-item ${tx.status}">
+                        <div class="result-item-name">
+                            ${tx.status === 'passed' ? '✅' : '❌'} ${tx.name}
+                        </div>
+                        <div class="result-item-result">${tx.actualResult || 'N/A'}</div>
+                        ${explorerUrl ? `<div class="result-item-link"><a href="${explorerUrl}" target="_blank" rel="noopener noreferrer">View →</a></div>` : ''}
+                    </div>
+                `;
+            }).join('')}
+        </div>
+    `;
+}
+
+function downloadTestReport() {
+    // Show the download format modal
+    showDownloadReportModal();
+}
+
+function showDownloadReportModal() {
+    const modal = document.getElementById('download-report-modal');
+    modal.classList.add('show');
+}
+
+function hideDownloadReportModal() {
+    const modal = document.getElementById('download-report-modal');
+    modal.classList.remove('show');
+}
+
+function downloadTestReportJSON() {
+    const passed = transactions.filter(tx => tx.status === 'passed').length;
+    const failed = transactions.filter(tx => tx.status === 'failed').length;
+    const total = transactions.length;
+    const passRate = total > 0 ? Math.round((passed / total) * 100) : 0;
+
+    const report = {
+        metadata: {
+            generatedAt: new Date().toISOString(),
+            network: currentNetwork,
+            totalTests: total,
+            passed: passed,
+            failed: failed,
+            passRate: `${passRate}%`
+        },
+        tests: transactions.map(tx => ({
+            name: tx.name,
+            type: tx.type,
+            status: tx.status,
+            expectedResult: tx.expectedResult,
+            actualResult: tx.actualResult,
+            hash: tx.hash,
+            submittedAt: tx.submittedAt,
+            explorerUrl: tx.hash ? getExplorerUrl(tx.hash, currentNetwork) : null,
+            transaction: buildTransactionObjectFromTest(tx)
+        }))
+    };
+
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `xrpl-test-report-${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    hideDownloadReportModal();
+    showToast('📥 JSON report downloaded', 'success', 3000);
+}
+
+function downloadTestReportMarkdown() {
+    const passed = transactions.filter(tx => tx.status === 'passed').length;
+    const failed = transactions.filter(tx => tx.status === 'failed').length;
+    const total = transactions.length;
+    const passRate = total > 0 ? Math.round((passed / total) * 100) : 0;
+
+    const date = new Date().toISOString().split('T')[0];
+    const time = new Date().toLocaleTimeString();
+
+    let markdown = `# XRPL Test Report\n\n`;
+    markdown += `**Generated:** ${date} at ${time}  \n`;
+    markdown += `**Network:** ${currentNetwork.charAt(0).toUpperCase() + currentNetwork.slice(1)}  \n\n`;
+
+    markdown += `## Summary\n\n`;
+    markdown += `| Metric | Value |\n`;
+    markdown += `|--------|-------|\n`;
+    markdown += `| Total Tests | ${total} |\n`;
+    markdown += `| Passed | ✅ ${passed} |\n`;
+    markdown += `| Failed | ❌ ${failed} |\n`;
+    markdown += `| Pass Rate | ${passRate}% |\n\n`;
+
+    markdown += `## Test Results\n\n`;
+
+    transactions.forEach((tx, index) => {
+        if (tx.status !== 'passed' && tx.status !== 'failed') return;
+
+        const statusIcon = tx.status === 'passed' ? '✅' : '❌';
+        markdown += `### ${index + 1}. ${statusIcon} ${tx.name}\n\n`;
+        markdown += `- **Type:** ${tx.type || 'N/A'}\n`;
+        markdown += `- **Status:** ${tx.status}\n`;
+        markdown += `- **Expected Result:** \`${tx.expectedResult}\`\n`;
+        markdown += `- **Actual Result:** \`${tx.actualResult || 'N/A'}\`\n`;
+
+        if (tx.hash) {
+            const explorerUrl = getExplorerUrl(tx.hash, currentNetwork);
+            markdown += `- **Transaction Hash:** \`${tx.hash}\`\n`;
+            markdown += `- **Explorer:** [View Transaction](${explorerUrl})\n`;
+        }
+
+        if (tx.submittedAt) {
+            markdown += `- **Submitted At:** ${new Date(tx.submittedAt).toLocaleString()}\n`;
+        }
+
+        markdown += `\n`;
+
+        // Add transaction details
+        const txObject = buildTransactionObjectFromTest(tx);
+        markdown += `**Transaction Details:**\n\n`;
+        markdown += `\`\`\`json\n`;
+        markdown += JSON.stringify(txObject, null, 2);
+        markdown += `\n\`\`\`\n\n`;
+    });
+
+    markdown += `---\n\n`;
+    markdown += `*Generated by XRPL Playground*\n`;
+
+    const blob = new Blob([markdown], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `xrpl-test-report-${date}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    hideDownloadReportModal();
+    showToast('📥 Markdown report downloaded', 'success', 3000);
 }
 
 // JSON Modal Functions
@@ -592,11 +947,21 @@ function initializeEventListeners() {
     document.getElementById('run-all-tests-btn').addEventListener('click', runAllTests);
     document.getElementById('show-json-btn').addEventListener('click', showJSONModal);
     document.getElementById('close-json-modal').addEventListener('click', hideJSONModal);
+    document.getElementById('download-report-btn').addEventListener('click', downloadTestReport);
+    document.getElementById('close-download-report-modal').addEventListener('click', hideDownloadReportModal);
+    document.getElementById('download-json-report').addEventListener('click', downloadTestReportJSON);
+    document.getElementById('download-markdown-report').addEventListener('click', downloadTestReportMarkdown);
 
-    // Close modal when clicking outside
+    // Close modals when clicking outside
     document.getElementById('json-modal').addEventListener('click', (e) => {
         if (e.target.id === 'json-modal') {
             hideJSONModal();
+        }
+    });
+
+    document.getElementById('download-report-modal').addEventListener('click', (e) => {
+        if (e.target.id === 'download-report-modal') {
+            hideDownloadReportModal();
         }
     });
 }
@@ -1408,13 +1773,31 @@ function renderAccounts() {
         icon.textContent = account.seed ? '🔑' : '👁️';
         icon.title = account.seed ? 'Has private key' : 'View only';
 
-        const addressSpan = document.createElement('span');
+        const infoContainer = document.createElement('div');
+        infoContainer.className = 'account-info';
+
+        const addressSpan = document.createElement('div');
         addressSpan.className = 'account-address';
         addressSpan.textContent = account.address;
         addressSpan.title = account.address;
 
+        const detailsSpan = document.createElement('div');
+        detailsSpan.className = 'account-details';
+        detailsSpan.innerHTML = '<span class="account-loading">Loading...</span>';
+
+        infoContainer.appendChild(addressSpan);
+        infoContainer.appendChild(detailsSpan);
+
         const buttonContainer = document.createElement('div');
         buttonContainer.className = 'account-buttons';
+
+        // Add Refresh button
+        const refreshBtn = document.createElement('button');
+        refreshBtn.className = 'account-refresh';
+        refreshBtn.textContent = '🔄';
+        refreshBtn.title = 'Refresh account info';
+        refreshBtn.addEventListener('click', () => fetchAccountInfo(account.address, detailsSpan));
+        buttonContainer.appendChild(refreshBtn);
 
         // Add Fund button for testnet/devnet
         if (currentNetwork !== 'mainnet') {
@@ -1440,13 +1823,64 @@ function renderAccounts() {
         buttonContainer.appendChild(removeBtn);
 
         item.appendChild(icon);
-        item.appendChild(addressSpan);
+        item.appendChild(infoContainer);
         item.appendChild(buttonContainer);
         list.appendChild(item);
+
+        // Fetch account info
+        fetchAccountInfo(account.address, detailsSpan);
     });
 
     // Refresh all account dropdowns in workspace
     refreshAccountDropdowns();
+}
+
+async function fetchAccountInfo(address, detailsElement) {
+    const networks = {
+        mainnet: 'wss://xrplcluster.com',
+        testnet: 'wss://s.altnet.rippletest.net:51233',
+        devnet: 'wss://s.devnet.rippletest.net:51233'
+    };
+
+    const endpoint = networks[currentNetwork];
+
+    try {
+        console.log(`Fetching account info for ${address} on ${currentNetwork}...`);
+        detailsElement.innerHTML = '<span class="account-loading">Loading...</span>';
+
+        const client = new xrpl.Client(endpoint);
+        await client.connect();
+        console.log('Connected to network');
+
+        const response = await client.request({
+            command: 'account_info',
+            account: address,
+            ledger_index: 'validated'
+        });
+
+        console.log('Account info response:', response);
+
+        await client.disconnect();
+
+        const balance = (parseInt(response.result.account_data.Balance) / 1000000).toFixed(2);
+        const sequence = response.result.account_data.Sequence;
+
+        console.log(`Balance: ${balance} XRP, Sequence: ${sequence}`);
+
+        detailsElement.innerHTML = `
+            <span class="account-detail-item">💰 ${balance} XRP</span>
+            <span class="account-detail-item">📊 Seq: ${sequence}</span>
+        `;
+    } catch (error) {
+        console.error('Error fetching account info:', error);
+        console.error('Error details:', error.data);
+
+        if (error.data?.error === 'actNotFound') {
+            detailsElement.innerHTML = '<span class="account-not-found">⚠️ Not funded</span>';
+        } else {
+            detailsElement.innerHTML = `<span class="account-error">❌ ${error.message || 'Error'}</span>`;
+        }
+    }
 }
 
 function refreshAccountDropdowns() {

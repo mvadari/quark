@@ -92,9 +92,17 @@
 
         <!-- Right Panel: Test Queue -->
         <aside class="test-queue-panel">
-            <h2>Test Queue</h2>
+            <div class="test-queue-panel-header">
+                <h2>Test Queue</h2>
+                <button id="download-report-btn" class="btn btn-secondary btn-sm" style="display: none;">📥 Download Report</button>
+            </div>
             <div id="test-queue-right" class="test-queue">
                 <!-- Test items will be rendered here -->
+            </div>
+
+            <!-- Test Results Summary -->
+            <div id="test-results-summary" class="test-results-summary" style="display: none;">
+                <!-- Results will be rendered here -->
             </div>
         </aside>
     </main>
@@ -126,10 +134,35 @@
         </div>
     </div>
 
+    <!-- Download Report Modal -->
+    <div id="download-report-modal" class="modal">
+        <div class="modal-content modal-small">
+            <div class="modal-header">
+                <h2>Download Test Report</h2>
+                <button id="close-download-report-modal" class="modal-close">×</button>
+            </div>
+            <div class="modal-body">
+                <p style="margin-bottom: 1.5rem; color: #666;">Choose a format for your test report:</p>
+                <div class="download-format-options">
+                    <button id="download-json-report" class="download-format-btn">
+                        <div class="download-format-icon">📄</div>
+                        <div class="download-format-label">JSON</div>
+                        <div class="download-format-desc">Machine-readable format with full details</div>
+                    </button>
+                    <button id="download-markdown-report" class="download-format-btn">
+                        <div class="download-format-icon">📝</div>
+                        <div class="download-format-label">Markdown</div>
+                        <div class="download-format-desc">Human-readable format for documentation</div>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Toast Container -->
     <div id="toast-container" class="toast-container"></div>
 
-    <script src="https://unpkg.com/xrpl@3.0.0/build/xrpl-latest-min.js"></script>
+    <script src="https://unpkg.com/xrpl@4.4.3/build/xrpl-latest-min.js"></script>
     <script src="app.js"></script>
 </body>
 </html>
